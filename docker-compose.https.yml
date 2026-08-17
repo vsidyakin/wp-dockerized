@@ -1,0 +1,44 @@
+services:
+  wordpress:
+    environment:
+      WORDPRESS_URL: ${WORDPRESS_URL:?Set WORDPRESS_URL=https://your-domain.example in .env}
+
+  varnish:
+    labels:
+      traefik.http.routers.wordpress.rule: Host(`${SITE_HOST:?Set SITE_HOST in .env}`)
+      traefik.http.routers.wordpress.entrypoints: websecure
+      traefik.http.routers.wordpress.tls: "true"
+      traefik.http.routers.wordpress.tls.certresolver: letsencrypt
+
+  traefik:
+    command:
+      - --api.dashboard=false
+      - --global.checknewversion=false
+      - --global.sendanonymoususage=false
+      - --log.level=${TRAEFIK_LOG_LEVEL:-INFO}
+      - --entrypoints.web.address=:80
+      - --entrypoints.websecure.address=:443
+      - --entrypoints.traefik.address=:8080
+      - --entrypoints.web.http.redirections.entrypoint.to=websecure
+      - --entrypoints.web.http.redirections.entrypoint.scheme=https
+      - --entrypoints.web.http.redirections.entrypoint.permanent=true
+      - --ping=true
+      - --ping.entrypoint=traefik
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      - --providers.docker.network=${COMPOSE_PROJECT_NAME:-wordpress}_frontend
+      - --providers.docker.constraints=Label(`com.docker.compose.project`,`${COMPOSE_PROJECT_NAME:-wordpress}`)
+      - --certificatesresolvers.letsencrypt.acme.email=${LETSENCRYPT_EMAIL:?Set LETSENCRYPT_EMAIL in .env}
+      - --certificatesresolvers.letsencrypt.acme.storage=${LETSENCRYPT_STORAGE:-/letsencrypt/acme.json}
+      - --certificatesresolvers.letsencrypt.acme.caserver=${LETSENCRYPT_CA_SERVER:-https://acme-v02.api.letsencrypt.org/directory}
+      - --certificatesresolvers.letsencrypt.acme.httpchallenge=true
+      - --certificatesresolvers.letsencrypt.acme.httpchallenge.entrypoint=web
+    ports:
+      - ${HTTP_PORT:?Set HTTP_PORT=80 in .env}:80
+      - ${HTTPS_PORT:?Set HTTPS_PORT=443 in .env}:443
+    volumes:
+      - letsencrypt_data:/letsencrypt
+
+volumes:
+  letsencrypt_data:
+    name: ${COMPOSE_PROJECT_NAME:-wordpress}_letsencrypt_data

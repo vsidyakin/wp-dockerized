@@ -158,16 +158,16 @@ services:
       retries: 6
       start_period: 30s
     labels:
-      - traefik.enable=true
-      - traefik.docker.network=${COMPOSE_PROJECT_NAME:-wordpress}_frontend
-      - traefik.http.routers.${COMPOSE_PROJECT_NAME:-wordpress}-wordpress.rule=Host(`${SITE_HOST:-localhost}`)
-      - traefik.http.routers.${COMPOSE_PROJECT_NAME:-wordpress}-wordpress.entrypoints=web
-      - traefik.http.routers.${COMPOSE_PROJECT_NAME:-wordpress}-wordpress.service=${COMPOSE_PROJECT_NAME:-wordpress}-varnish
-      - traefik.http.services.${COMPOSE_PROJECT_NAME:-wordpress}-varnish.loadbalancer.server.port=80
-      - traefik.http.services.${COMPOSE_PROJECT_NAME:-wordpress}-varnish.loadbalancer.passhostheader=true
-      - traefik.http.services.${COMPOSE_PROJECT_NAME:-wordpress}-varnish.loadbalancer.healthcheck.path=/healthz
-      - traefik.http.services.${COMPOSE_PROJECT_NAME:-wordpress}-varnish.loadbalancer.healthcheck.interval=10s
-      - traefik.http.services.${COMPOSE_PROJECT_NAME:-wordpress}-varnish.loadbalancer.healthcheck.timeout=4s
+      traefik.enable: "true"
+      traefik.docker.network: ${COMPOSE_PROJECT_NAME:-wordpress}_frontend
+      traefik.http.routers.wordpress.rule: Host(`${SITE_HOST:-localhost}`)
+      traefik.http.routers.wordpress.entrypoints: web
+      traefik.http.routers.wordpress.service: varnish
+      traefik.http.services.varnish.loadbalancer.server.port: "80"
+      traefik.http.services.varnish.loadbalancer.passhostheader: "true"
+      traefik.http.services.varnish.loadbalancer.healthcheck.path: /healthz
+      traefik.http.services.varnish.loadbalancer.healthcheck.interval: 10s
+      traefik.http.services.varnish.loadbalancer.healthcheck.timeout: 4s
     logging: *default-logging
 
   traefik:

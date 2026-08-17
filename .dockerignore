@@ -1,8 +1,11 @@
 .git
 .gitignore
-.env
+.env*
 README.md
-docker-compose.yml
+docker-compose*.yml
+acme*.json
+letsencrypt/
+output/
 *.log
 *.sql
 *.sql.gz

@@ -1,4 +1,6 @@
 .env
+acme*.json
+letsencrypt/
 *.sql
 *.sql.gz
 *.tar.gz

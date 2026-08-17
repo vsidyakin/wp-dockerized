@@ -9,7 +9,7 @@ Traefik -> Varnish -> NGINX -> PHP-FPM -> MySQL
                                +-------> Memcached
 ```
 
-Only Traefik publishes a host port. All images are pulled from public Docker Hub
+Only Traefik publishes host ports. All images are pulled from public Docker Hub
 repositories. WordPress files and MySQL data are stored in named Docker volumes.
 
 ## Requirements
@@ -18,7 +18,8 @@ repositories. WordPress files and MySQL data are stored in named Docker volumes.
 - x86_64/AMD64 CPU; 32-bit x86 is not supported
 - Docker Compose 2.20 or newer
 - at least 2 GB RAM for a small installation
-- ports 80/443 allowed by the server firewall as required
+- ports 80/443 allowed by the server firewall for public HTTPS
+- a public DNS record for automatic Let's Encrypt certificates
 
 ## Start locally
 
@@ -36,36 +37,166 @@ Open <http://localhost:8080> and finish the standard WordPress installer.
 
 ## Start on a server
 
-Set the public address in `.env` before starting:
+The HTTPS deployment uses `docker-compose.https.yml` in addition to the base
+Compose file. It configures Traefik to:
+
+- listen on public ports 80 and 443
+- redirect normal HTTP requests to HTTPS
+- complete the Let's Encrypt HTTP-01 challenge on port 80
+- store certificates and account data in a persistent named Docker volume
+- renew certificates automatically
+
+Before starting, create an `A` record for the hostname pointing to the public
+IPv4 address of the server. If an `AAAA` record exists, it must point to a
+working public IPv6 address on the same server. Allow inbound TCP traffic to
+ports 80 and 443, and make sure no other process is using these ports.
+
+Create the server environment file:
+
+```bash
+cp .env.server.example .env
+```
+
+Replace the hostname, email, and database passwords. The public settings should
+look like this:
 
 ```dotenv
 COMPOSE_PROJECT_NAME=client-wordpress
 DOCKER_PLATFORM=linux/amd64
 SITE_HOST=wordpress.example.com
 HTTP_PORT=80
+HTTPS_PORT=443
 WORDPRESS_URL=https://wordpress.example.com
+LETSENCRYPT_EMAIL=admin@example.com
+LETSENCRYPT_CA_SERVER=https://acme-v02.api.letsencrypt.org/directory
+LETSENCRYPT_STORAGE=/letsencrypt/acme.json
 ```
 
-`SITE_HOST` contains only the hostname or server IP. `WORDPRESS_URL` is the
-complete visitor-facing URL without a trailing slash. The base stack serves
-HTTP; terminate TLS at a load balancer or extend Traefik with ACME before using
-the site in production. Forwarded HTTPS is already supported by WordPress.
+`SITE_HOST` contains only the hostname, without `https://` or a path.
+`WORDPRESS_URL` is the complete visitor-facing URL without a trailing slash.
+Do not set `HTTP_PORT=443`: port 80 is required for the HTTP-01 challenge, while
+`HTTPS_PORT` publishes Traefik's separate TLS entrypoint.
 
-Start and inspect the environment:
+Validate the merged configuration:
 
 ```bash
-docker compose up -d --build --wait
-docker compose ps
+docker compose \
+  -f docker-compose.yml \
+  -f docker-compose.https.yml \
+  config --quiet
+```
+
+Start the public HTTPS environment:
+
+```bash
+docker compose \
+  -f docker-compose.yml \
+  -f docker-compose.https.yml \
+  up -d --build --wait
+```
+
+Traefik requests the certificate after it discovers the HTTPS router. Follow
+its logs while the certificate is being issued:
+
+```bash
+docker compose \
+  -f docker-compose.yml \
+  -f docker-compose.https.yml \
+  logs -f traefik
+```
+
+Verify the public endpoint:
+
+```bash
+curl -I https://wordpress.example.com/
+```
+
+Inspect the certificate details if needed:
+
+```bash
+openssl s_client \
+  -connect wordpress.example.com:443 \
+  -servername wordpress.example.com </dev/null 2>/dev/null \
+  | openssl x509 -noout -issuer -subject -dates
+```
+
+### Test with Let's Encrypt staging first
+
+The staging service performs the same public domain validation but issues an
+intentionally untrusted test certificate. It is recommended for the first
+server test because it has much more generous rate limits.
+
+Set these two values in `.env`:
+
+```dotenv
+LETSENCRYPT_CA_SERVER=https://acme-staging-v02.api.letsencrypt.org/directory
+LETSENCRYPT_STORAGE=/letsencrypt/acme-staging.json
+```
+
+Start the HTTPS environment with the same two Compose files. Test it with
+`curl -kI` because operating systems and browsers do not trust the staging CA:
+
+```bash
+curl -kI https://wordpress.example.com/
+```
+
+A staging certificate normally has an issuer containing `Fake LE Intermediate`.
+After the staging test succeeds, switch `.env` back to the production values:
+
+```dotenv
+LETSENCRYPT_CA_SERVER=https://acme-v02.api.letsencrypt.org/directory
+LETSENCRYPT_STORAGE=/letsencrypt/acme.json
+```
+
+Apply the production configuration:
+
+```bash
+docker compose \
+  -f docker-compose.yml \
+  -f docker-compose.https.yml \
+  up -d --force-recreate traefik varnish
+```
+
+Staging and production use different storage files in the same named volume, so
+the untrusted staging account and certificate are not reused in production.
+
+### Manage the server environment
+
+Inspect the environment:
+
+```bash
+docker compose \
+  -f docker-compose.yml \
+  -f docker-compose.https.yml \
+  ps
 ```
 
 Stop it without removing persistent data:
 
 ```bash
-docker compose down
+docker compose \
+  -f docker-compose.yml \
+  -f docker-compose.https.yml \
+  down
 ```
 
 Never use `docker compose down --volumes` unless the WordPress files and MySQL
 database should be permanently deleted or have already been backed up.
+
+The named volume `${COMPOSE_PROJECT_NAME}_letsencrypt_data` contains the ACME
+account, certificates, and private keys. Do not publish its contents or commit
+them to Git. Include this volume in the server backup plan.
+
+If certificate issuance fails, verify all of the following before retrying:
+
+- the public DNS records resolve to this server
+- public ports 80 and 443 reach Traefik directly
+- the firewall and hosting provider security rules allow both ports
+- no proxy or router sends the ACME request to another machine
+- no unrelated process is already listening on port 80 or 443
+
+HTTP-01 cannot work on a server behind CGNAT or without public inbound port 80.
+In that situation, configure Traefik with a DNS-01 provider instead.
 
 ## Health checks
 

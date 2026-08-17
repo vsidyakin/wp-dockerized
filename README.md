@@ -21,7 +21,10 @@ repositories. WordPress files and MySQL data are stored in named Docker volumes.
 - ports 80/443 allowed by the server firewall for public HTTPS
 - a public DNS record for automatic Let's Encrypt certificates
 
-## Start locally
+## Start locally without HTTPS
+
+The local environment uses plain HTTP and does not request or require an SSL
+certificate.
 
 ```bash
 cp .env.example .env
@@ -35,7 +38,7 @@ docker compose up -d --build --wait
 
 Open <http://localhost:8080> and finish the standard WordPress installer.
 
-## Start on a server
+## Start on a public server with HTTPS
 
 The HTTPS deployment uses `docker-compose.https.yml` in addition to the base
 Compose file. It configures Traefik to:
@@ -119,46 +122,6 @@ openssl s_client \
   -servername wordpress.example.com </dev/null 2>/dev/null \
   | openssl x509 -noout -issuer -subject -dates
 ```
-
-### Test with Let's Encrypt staging first
-
-The staging service performs the same public domain validation but issues an
-intentionally untrusted test certificate. It is recommended for the first
-server test because it has much more generous rate limits.
-
-Set these two values in `.env`:
-
-```dotenv
-LETSENCRYPT_CA_SERVER=https://acme-staging-v02.api.letsencrypt.org/directory
-LETSENCRYPT_STORAGE=/letsencrypt/acme-staging.json
-```
-
-Start the HTTPS environment with the same two Compose files. Test it with
-`curl -kI` because operating systems and browsers do not trust the staging CA:
-
-```bash
-curl -kI https://wordpress.example.com/
-```
-
-A staging certificate normally has an issuer containing `Fake LE Intermediate`.
-After the staging test succeeds, switch `.env` back to the production values:
-
-```dotenv
-LETSENCRYPT_CA_SERVER=https://acme-v02.api.letsencrypt.org/directory
-LETSENCRYPT_STORAGE=/letsencrypt/acme.json
-```
-
-Apply the production configuration:
-
-```bash
-docker compose \
-  -f docker-compose.yml \
-  -f docker-compose.https.yml \
-  up -d --force-recreate traefik varnish
-```
-
-Staging and production use different storage files in the same named volume, so
-the untrusted staging account and certificate are not reused in production.
 
 ### Manage the server environment
 

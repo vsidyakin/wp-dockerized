@@ -1,0 +1,223 @@
+name: ${COMPOSE_PROJECT_NAME:-wordpress}
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  db:
+    image: ${MYSQL_IMAGE:-mysql:8.4.10}
+    platform: ${DOCKER_PLATFORM:-linux/amd64}
+    restart: unless-stopped
+    command:
+      - --disable-log-bin
+    environment:
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-wordpress}
+      MYSQL_USER: ${MYSQL_USER:-wordpress}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?Set MYSQL_PASSWORD in .env}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?Set MYSQL_ROOT_PASSWORD in .env}
+    volumes:
+      - db_data:/var/lib/mysql
+      - ./docker/mysql/init:/docker-entrypoint-initdb.d:ro
+    networks:
+      - backend
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          MYSQL_PWD="$${MYSQL_PASSWORD}" mysql
+          --protocol=TCP --host=127.0.0.1
+          --user="$${MYSQL_USER}" --database="$${MYSQL_DATABASE}"
+          --silent --skip-column-names --execute="SELECT 1"
+          | grep -qx 1
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    logging: *default-logging
+
+  memcached:
+    image: ${MEMCACHED_IMAGE:-memcached:1.6.45-alpine}
+    platform: ${DOCKER_PLATFORM:-linux/amd64}
+    restart: unless-stopped
+    command:
+      - memcached
+      - --memory-limit=${MEMCACHED_MEMORY_MB:-128}
+      - --conn-limit=${MEMCACHED_MAX_CONNECTIONS:-1024}
+      - --threads=${MEMCACHED_THREADS:-4}
+    networks:
+      - backend
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - printf 'version\r\n' | nc -w 1 127.0.0.1 11211 | grep -q '^VERSION'
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    logging: *default-logging
+
+  wordpress:
+    build:
+      context: .
+      args:
+        WORDPRESS_IMAGE: ${WORDPRESS_IMAGE:-wordpress:7.0.2-php8.3-fpm}
+        MEMCACHED_PHP_VERSION: ${MEMCACHED_PHP_VERSION:-3.3.0}
+    image: ${WORDPRESS_LOCAL_IMAGE:-portable-wordpress:7.0.2-php8.3-fpm-nginx}
+    platform: ${DOCKER_PLATFORM:-linux/amd64}
+    restart: unless-stopped
+    environment:
+      WORDPRESS_DB_HOST: db:3306
+      WORDPRESS_DB_NAME: ${MYSQL_DATABASE:-wordpress}
+      WORDPRESS_DB_USER: ${MYSQL_USER:-wordpress}
+      WORDPRESS_DB_PASSWORD: ${MYSQL_PASSWORD:?Set MYSQL_PASSWORD in .env}
+      WORDPRESS_TABLE_PREFIX: ${WORDPRESS_TABLE_PREFIX:-wp_}
+      WORDPRESS_DEBUG: ${WORDPRESS_DEBUG:-false}
+      WORDPRESS_URL: ${WORDPRESS_URL:-http://localhost:8080}
+      MEMCACHED_HOST: memcached
+      MEMCACHED_PORT: "11211"
+      WP_MEMORY_LIMIT: ${WP_MEMORY_LIMIT:-256M}
+      WP_MAX_MEMORY_LIMIT: ${WP_MAX_MEMORY_LIMIT:-512M}
+      WORDPRESS_CONFIG_EXTRA: |
+        if (!empty($$_SERVER['HTTP_X_FORWARDED_PROTO']) && strpos($$_SERVER['HTTP_X_FORWARDED_PROTO'], 'https') !== false) {
+            $$_SERVER['HTTPS'] = 'on';
+        }
+        if (!defined('WP_CACHE')) {
+            define('WP_CACHE', true);
+        }
+        if (!defined('WP_HOME')) {
+            define('WP_HOME', rtrim(getenv('WORDPRESS_URL'), '/'));
+        }
+        if (!defined('WP_SITEURL')) {
+            define('WP_SITEURL', rtrim(getenv('WORDPRESS_URL'), '/'));
+        }
+        if (!defined('WP_MEMORY_LIMIT')) {
+            define('WP_MEMORY_LIMIT', getenv('WP_MEMORY_LIMIT') ?: '256M');
+        }
+        if (!defined('WP_MAX_MEMORY_LIMIT')) {
+            define('WP_MAX_MEMORY_LIMIT', getenv('WP_MAX_MEMORY_LIMIT') ?: '512M');
+        }
+        if (!defined('WP_DEBUG')) {
+            define('WP_DEBUG', filter_var(getenv('WORDPRESS_DEBUG'), FILTER_VALIDATE_BOOLEAN));
+        }
+        global $$memcached_servers;
+        $$memcached_servers = array(
+            'default' => array(getenv('MEMCACHED_HOST') . ':' . getenv('MEMCACHED_PORT')),
+        );
+    volumes:
+      - wordpress_data:/var/www/html
+    networks:
+      - application
+      - backend
+    depends_on:
+      db:
+        condition: service_healthy
+        restart: true
+      memcached:
+        condition: service_healthy
+        restart: true
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - curl --fail --silent --show-error --max-time 4 http://127.0.0.1/healthz.php > /dev/null
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 40s
+    logging: *default-logging
+
+  varnish:
+    image: ${VARNISH_IMAGE:-varnish:6.0.18}
+    platform: ${DOCKER_PLATFORM:-linux/amd64}
+    restart: unless-stopped
+    environment:
+      VARNISH_SIZE: ${VARNISH_SIZE:-256M}
+    volumes:
+      - ./docker/varnish/default.vcl:/etc/varnish/default.vcl:ro
+    tmpfs:
+      - /var/lib/varnish/varnishd:exec,mode=0755
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    networks:
+      - frontend
+      - application
+    depends_on:
+      wordpress:
+        condition: service_healthy
+        restart: true
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - varnishadm ping >/dev/null && varnishadm backend.list | grep -qi healthy
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=${COMPOSE_PROJECT_NAME:-wordpress}_frontend
+      - traefik.http.routers.${COMPOSE_PROJECT_NAME:-wordpress}-wordpress.rule=Host(`${SITE_HOST:-localhost}`)
+      - traefik.http.routers.${COMPOSE_PROJECT_NAME:-wordpress}-wordpress.entrypoints=web
+      - traefik.http.routers.${COMPOSE_PROJECT_NAME:-wordpress}-wordpress.service=${COMPOSE_PROJECT_NAME:-wordpress}-varnish
+      - traefik.http.services.${COMPOSE_PROJECT_NAME:-wordpress}-varnish.loadbalancer.server.port=80
+      - traefik.http.services.${COMPOSE_PROJECT_NAME:-wordpress}-varnish.loadbalancer.passhostheader=true
+      - traefik.http.services.${COMPOSE_PROJECT_NAME:-wordpress}-varnish.loadbalancer.healthcheck.path=/healthz
+      - traefik.http.services.${COMPOSE_PROJECT_NAME:-wordpress}-varnish.loadbalancer.healthcheck.interval=10s
+      - traefik.http.services.${COMPOSE_PROJECT_NAME:-wordpress}-varnish.loadbalancer.healthcheck.timeout=4s
+    logging: *default-logging
+
+  traefik:
+    image: ${TRAEFIK_IMAGE:-traefik:v3.7.5}
+    platform: ${DOCKER_PLATFORM:-linux/amd64}
+    restart: unless-stopped
+    command:
+      - --api.dashboard=false
+      - --global.checknewversion=false
+      - --global.sendanonymoususage=false
+      - --entrypoints.web.address=:80
+      - --entrypoints.traefik.address=:8080
+      - --ping=true
+      - --ping.entrypoint=traefik
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      - --providers.docker.network=${COMPOSE_PROJECT_NAME:-wordpress}_frontend
+      - --providers.docker.constraints=Label(`com.docker.compose.project`,`${COMPOSE_PROJECT_NAME:-wordpress}`)
+    ports:
+      - ${HTTP_PORT:-8080}:80
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - frontend
+    depends_on:
+      varnish:
+        condition: service_healthy
+        restart: true
+    healthcheck:
+      test:
+        - CMD
+        - traefik
+        - healthcheck
+        - --ping
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    security_opt:
+      - no-new-privileges:true
+    logging: *default-logging
+
+networks:
+  frontend:
+    name: ${COMPOSE_PROJECT_NAME:-wordpress}_frontend
+  application:
+    name: ${COMPOSE_PROJECT_NAME:-wordpress}_application
+  backend:
+    name: ${COMPOSE_PROJECT_NAME:-wordpress}_backend
+
+volumes:
+  db_data:
+  wordpress_data:

@@ -1,0 +1,10 @@
+.git
+.gitignore
+.env
+README.md
+docker-compose.yml
+*.log
+*.sql
+*.sql.gz
+*.tar.gz
+.DS_Store
